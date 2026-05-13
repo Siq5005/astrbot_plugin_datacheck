@@ -14,12 +14,13 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 _TIMESTAMP_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\.\d{3}\]")
 _ERROR_LEVELS = ("[ERRO]", "[CRIT]")
+_MAX_ENTRIES = 100
 
 
 def parse_error_entries(
     lines: list[str],
     cutoff: datetime.datetime,
-    max_entries: int = 100,
+    max_entries: int = _MAX_ENTRIES,
 ) -> list[str]:
     """Parse log lines and return error entries newer than cutoff.
 
@@ -44,12 +45,12 @@ def parse_error_entries(
                 if len(entries) >= max_entries:
                     break
             ts = datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
-            current_entry = line.rstrip("\n")
+            current_entry = line.rstrip("\r\n")
             current_is_error = any(lvl in line for lvl in _ERROR_LEVELS)
             current_in_range = ts >= cutoff
         else:
             if current_entry is not None:
-                current_entry += "\n" + line.rstrip("\n")
+                current_entry += "\n" + line.rstrip("\r\n")
 
     if (
         current_entry is not None
@@ -96,8 +97,8 @@ class DataCheckPlugin(Star):
                 continue
             entries = parse_error_entries(file_lines, cutoff)
             all_entries.extend(entries)
-            if len(all_entries) >= 100:
-                all_entries = all_entries[:100]
+            if len(all_entries) >= _MAX_ENTRIES:
+                all_entries = all_entries[:_MAX_ENTRIES]
                 break
 
         return all_entries
@@ -126,7 +127,7 @@ class DataCheckPlugin(Star):
         for entry in entries:
             nodes.append(Node(content=[Plain(entry)], uin="0", name="AstrBot 日志"))
 
-        if len(entries) >= 100:
+        if len(entries) >= _MAX_ENTRIES:
             nodes.append(
                 Node(
                     content=[Plain(f"⚠ 错误记录已达上限(100条)，可能还有更多未显示。")],
