@@ -1,24 +1,164 @@
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
+from __future__ import annotations
+
+import datetime
+import glob
+import os
+import re
+
+from astrbot.api import AstrBotConfig, logger
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
+from astrbot.api.event.filter import PlatformAdapterType
+from astrbot.api.message_components import Node, Nodes, Plain
 from astrbot.api.star import Context, Star, register
-from astrbot.api import logger
+from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
-@register("helloworld", "YourName", "一个简单的 Hello World 插件", "1.0.0")
-class MyPlugin(Star):
-    def __init__(self, context: Context):
+_TIMESTAMP_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\.\d{3}\]")
+_ERROR_LEVELS = ("[ERRO]", "[CRIT]")
+
+
+def parse_error_entries(
+    lines: list[str],
+    cutoff: datetime.datetime,
+    max_entries: int = 100,
+) -> list[str]:
+    """Parse log lines and return error entries newer than cutoff.
+
+    Args:
+        lines: Raw log file lines.
+        cutoff: Only include entries at or after this time.
+        max_entries: Maximum number of entries to return.
+
+    Returns:
+        List of error entry strings (may include multi-line tracebacks).
+    """
+    entries: list[str] = []
+    current_entry: str | None = None
+    current_is_error = False
+    current_in_range = False
+
+    for line in lines:
+        m = _TIMESTAMP_RE.match(line)
+        if m:
+            if current_entry is not None and current_is_error and current_in_range:
+                entries.append(current_entry)
+                if len(entries) >= max_entries:
+                    break
+            ts = datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+            current_entry = line.rstrip("\n")
+            current_is_error = any(lvl in line for lvl in _ERROR_LEVELS)
+            current_in_range = ts >= cutoff
+        else:
+            if current_entry is not None:
+                current_entry += "\n" + line.rstrip("\n")
+
+    if (
+        current_entry is not None
+        and current_is_error
+        and current_in_range
+        and len(entries) < max_entries
+    ):
+        entries.append(current_entry)
+
+    return entries
+
+
+@register("astrbot_plugin_datacheck", "Coe", "查询 AstrBot 错误日志", "1.0.0")
+class DataCheckPlugin(Star):
+    """查询 AstrBot 近 N 小时内的错误日志，通过合并转发发送。支持 /查日志 指令和 LLM 意图识别。"""
+
+    def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
+        self.config = config
 
-    async def initialize(self):
-        """可选择实现异步的插件初始化方法，当实例化该插件类之后会自动调用该方法。"""
+    def _check_permission(self, event: AstrMessageEvent) -> bool:
+        if self.config.get("admin_only", True):
+            return event.is_admin()
+        return True
 
-    # 注册指令的装饰器。指令名为 helloworld。注册成功后，发送 `/helloworld` 就会触发这个指令，并回复 `你好, {user_name}!`
-    @filter.command("helloworld")
-    async def helloworld(self, event: AstrMessageEvent):
-        """这是一个 hello world 指令""" # 这是 handler 的描述，将会被解析方便用户了解插件内容。建议填写。
-        user_name = event.get_sender_name()
-        message_str = event.message_str # 用户发的纯文本消息字符串
-        message_chain = event.get_messages() # 用户所发的消息的消息链 # from astrbot.api.message_components import *
-        logger.info(message_chain)
-        yield event.plain_result(f"Hello, {user_name}, 你发了 {message_str}!") # 发送一条纯文本消息
+    def _scan_error_logs(self) -> list[str]:
+        hours = self.config.get("hours", 24)
+        cutoff = datetime.datetime.now() - datetime.timedelta(hours=hours)
 
-    async def terminate(self):
-        """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
+        log_dir = os.path.join(get_astrbot_data_path(), "logs")
+        if not os.path.isdir(log_dir):
+            return []
+
+        log_files = sorted(glob.glob(os.path.join(log_dir, "astrbot*.log*")))
+        if not log_files:
+            return []
+
+        all_entries: list[str] = []
+        for log_file in log_files:
+            try:
+                with open(log_file, encoding="utf-8", errors="replace") as f:
+                    file_lines = f.readlines()
+            except OSError:
+                continue
+            entries = parse_error_entries(file_lines, cutoff)
+            all_entries.extend(entries)
+            if len(all_entries) >= 100:
+                all_entries = all_entries[:100]
+                break
+
+        return all_entries
+
+    @filter.platform_adapter_type(PlatformAdapterType.AIOCQHTTP)
+    @filter.command("查日志")
+    async def check_log_command(self, event: AstrMessageEvent):
+        """查询近 N 小时内的 AstrBot 错误日志"""
+        if not self._check_permission(event):
+            yield event.plain_result("权限不足，仅管理员可使用此功能。")
+            return
+
+        log_dir = os.path.join(get_astrbot_data_path(), "logs")
+        if not os.path.isdir(log_dir):
+            yield event.plain_result("未找到日志文件，请确认 AstrBot 已启用文件日志。")
+            return
+
+        entries = self._scan_error_logs()
+        hours = self.config.get("hours", 24)
+
+        if not entries:
+            yield event.plain_result(f"近 {hours} 小时内未发现错误日志。")
+            return
+
+        nodes = []
+        for entry in entries:
+            nodes.append(Node(content=[Plain(entry)], uin="0", name="AstrBot 日志"))
+
+        if len(entries) >= 100:
+            nodes.append(
+                Node(
+                    content=[Plain(f"⚠ 错误记录已达上限(100条)，可能还有更多未显示。")],
+                    uin="0",
+                    name="AstrBot 日志",
+                )
+            )
+
+        await event.send(MessageChain([Nodes(nodes)]))
+        event.stop_event()
+
+    @filter.platform_adapter_type(PlatformAdapterType.AIOCQHTTP)
+    @filter.llm_tool("check_error_log")
+    async def check_error_log_tool(self, event: AstrMessageEvent):
+        """查询 AstrBot 的错误日志，当用户询问签到是否失败、机器人是否掉线、是否有报错等问题时调用此工具。"""
+        if not self._check_permission(event):
+            return "用户权限不足，仅管理员可查询错误日志。"
+
+        log_dir = os.path.join(get_astrbot_data_path(), "logs")
+        if not os.path.isdir(log_dir):
+            return "未找到日志文件，AstrBot 可能未启用文件日志功能。"
+
+        entries = self._scan_error_logs()
+        hours = self.config.get("hours", 24)
+
+        if not entries:
+            return f"近 {hours} 小时内未发现任何错误日志，AstrBot 运行正常。"
+
+        nodes = []
+        for entry in entries:
+            nodes.append(Node(content=[Plain(entry)], uin="0", name="AstrBot 日志"))
+
+        await event.send(MessageChain([Nodes(nodes)]))
+
+        return f"已找到 {len(entries)} 条错误记录，已通过合并转发消息发送给用户。"
