@@ -1,5 +1,6 @@
 name: astrbot_plugin_datacheck
 display_name: 日志错误查询
+short_desc: 查询 AstrBot 近 N 小时内的错误日志，通过合并转发发送。支持指令和 LLM 意图识别触发。
 desc: 查询 AstrBot 近 N 小时内的错误日志，通过合并转发发送。支持指令和 LLM 意图识别触发。
 version: v1.0.0
 author: Coe
