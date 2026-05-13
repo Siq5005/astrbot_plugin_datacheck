@@ -13,40 +13,36 @@ from astrbot.api.star import Context, Star, register
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 _TIMESTAMP_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\.\d{3}\]")
-_ERROR_LEVELS = ("[ERRO]", "[CRIT]")
 _MAX_ENTRIES = 100
 
 
 def parse_error_entries(
     lines: list[str],
     cutoff: datetime.datetime,
+    levels: tuple[str, ...] = ("[ERRO]", "[CRIT]"),
+    keyword_pattern: re.Pattern | None = None,
     max_entries: int = _MAX_ENTRIES,
 ) -> list[str]:
-    """Parse log lines and return error entries newer than cutoff.
-
-    Args:
-        lines: Raw log file lines.
-        cutoff: Only include entries at or after this time.
-        max_entries: Maximum number of entries to return.
-
-    Returns:
-        List of error entry strings (may include multi-line tracebacks).
-    """
     entries: list[str] = []
     current_entry: str | None = None
-    current_is_error = False
+    current_is_match = False
     current_in_range = False
+
+    def _try_append(entry: str) -> bool:
+        if keyword_pattern and not keyword_pattern.search(entry):
+            return False
+        entries.append(entry)
+        return len(entries) >= max_entries
 
     for line in lines:
         m = _TIMESTAMP_RE.match(line)
         if m:
-            if current_entry is not None and current_is_error and current_in_range:
-                entries.append(current_entry)
-                if len(entries) >= max_entries:
+            if current_entry is not None and current_is_match and current_in_range:
+                if _try_append(current_entry):
                     break
             ts = datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
             current_entry = line.rstrip("\r\n")
-            current_is_error = any(lvl in line for lvl in _ERROR_LEVELS)
+            current_is_match = any(lvl in line for lvl in levels)
             current_in_range = ts >= cutoff
         else:
             if current_entry is not None:
@@ -54,11 +50,11 @@ def parse_error_entries(
 
     if (
         current_entry is not None
-        and current_is_error
+        and current_is_match
         and current_in_range
         and len(entries) < max_entries
     ):
-        entries.append(current_entry)
+        _try_append(current_entry)
 
     return entries
 
@@ -76,9 +72,27 @@ class DataCheckPlugin(Star):
             return event.is_admin()
         return True
 
+    def _build_levels(self) -> tuple[str, ...]:
+        level_map = {"WARN": "[WARN]", "ERRO": "[ERRO]", "CRIT": "[CRIT]"}
+        log_levels = self.config.get("log_levels", {})
+        levels = tuple(v for k, v in level_map.items() if log_levels.get(k, k != "WARN"))
+        return levels or ("[ERRO]", "[CRIT]")
+
+    def _build_keyword_pattern(self) -> re.Pattern | None:
+        keyword = self.config.get("keyword", "")
+        if not keyword:
+            return None
+        try:
+            return re.compile(keyword, re.IGNORECASE)
+        except re.error:
+            logger.warning(f"无效的关键字正则表达式: {keyword}")
+            return None
+
     def _scan_error_logs(self) -> list[str]:
         hours = self.config.get("hours", 24)
         cutoff = datetime.datetime.now() - datetime.timedelta(hours=hours)
+        levels = self._build_levels()
+        keyword_pattern = self._build_keyword_pattern()
 
         log_dir = os.path.join(get_astrbot_data_path(), "logs")
         if not os.path.isdir(log_dir):
@@ -95,7 +109,7 @@ class DataCheckPlugin(Star):
                     file_lines = f.readlines()
             except OSError:
                 continue
-            entries = parse_error_entries(file_lines, cutoff)
+            entries = parse_error_entries(file_lines, cutoff, levels, keyword_pattern)
             all_entries.extend(entries)
             if len(all_entries) >= _MAX_ENTRIES:
                 all_entries = all_entries[:_MAX_ENTRIES]
@@ -120,7 +134,11 @@ class DataCheckPlugin(Star):
         hours = self.config.get("hours", 24)
 
         if not entries:
-            yield event.plain_result(f"近 {hours} 小时内未发现错误日志。")
+            keyword = self.config.get("keyword", "")
+            hint = f"近 {hours} 小时内未发现匹配的日志"
+            if keyword:
+                hint += f"（关键字: {keyword}）"
+            yield event.plain_result(hint + "。")
             return
 
         nodes = []
@@ -154,7 +172,7 @@ class DataCheckPlugin(Star):
         hours = self.config.get("hours", 24)
 
         if not entries:
-            return f"近 {hours} 小时内未发现任何错误日志，AstrBot 运行正常。"
+            return f"近 {hours} 小时内未发现匹配的日志，AstrBot 运行正常。"
 
         nodes = []
         for entry in entries:

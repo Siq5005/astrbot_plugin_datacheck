@@ -8,5 +8,31 @@
     "description": "扫描最近多少小时内的日志",
     "type": "int",
     "default": 24
+  },
+  "log_levels": {
+    "description": "勾选要返回的日志级别",
+    "type": "object",
+    "items": {
+      "WARN": {
+        "description": "警告日志",
+        "type": "bool",
+        "default": false
+      },
+      "ERRO": {
+        "description": "错误日志",
+        "type": "bool",
+        "default": true
+      },
+      "CRIT": {
+        "description": "严重错误日志",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "keyword": {
+    "description": "关键字正则表达式，在级别过滤后进一步匹配（留空则不过滤）",
+    "type": "string",
+    "default": ""
   }
 }
