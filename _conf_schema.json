@@ -1,0 +1,12 @@
+{
+  "admin_only": {
+    "description": "仅管理员可查询日志",
+    "type": "bool",
+    "default": true
+  },
+  "hours": {
+    "description": "扫描最近多少小时内的日志",
+    "type": "int",
+    "default": 24
+  }
+}
